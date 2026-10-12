@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Last One Standing</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #10151d; color: #f4f7fb;
+    font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+    display: flex; flex-direction: column; align-items: center; min-height: 100vh;
+  }
+  header { width: min(100%, 1000px); padding: 14px 18px 8px; display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  h1 { font-size: clamp(20px, 4vw, 30px); margin: 0; letter-spacing: .04em; }
+  .subtitle { color:#9eacbd; font-size:13px; margin-top:3px; }
+  #hud { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; padding: 8px 18px 12px; width:min(100%,1000px); }
+  #hud .health-pill { margin-left:auto; order: -1; background:#24352e; border-color:#47795e; }
+  @media (min-width:650px) {
+    #hud { position:relative; }
+    #hud .health-pill { margin-left:auto; }
+  }
+  .pill { background:#202a37; border:1px solid #344253; border-radius:10px; padding:8px 12px; font-size:14px; }
+  #game-wrap { width:min(100%,1000px); padding:0 12px; position:relative; }
+  canvas { width:100%; display:block; aspect-ratio: 16/10; border:2px solid #3b4a5c; border-radius:12px; background:#497e4d; cursor:crosshair; touch-action:none; }
+  #overlay { position:absolute; inset:0 12px; display:flex; align-items:center; justify-content:center; background:#0b1019bb; border-radius:12px; padding:20px; }
+  #panel { max-width:460px; background:#182230; border:1px solid #42536a; border-radius:16px; padding:24px; text-align:center; box-shadow:0 16px 50px #0008; }
+  #panel h2 { margin:0 0 8px; font-size:30px; }
+  #panel p { color:#c1ccda; line-height:1.5; }
+  button { border:0; border-radius:10px; padding:12px 20px; font-weight:800; font-size:15px; cursor:pointer; background:#f5c84c; color:#17202a; }
+  button:hover { filter:brightness(1.08); }
+  .controls { width:min(100%,1000px); padding:12px 18px 22px; color:#aebccc; font-size:13px; line-height:1.7; }
+  .key { display:inline-block; padding:1px 6px; border:1px solid #526174; border-radius:5px; color:#fff; background:#202a37; }
+  @media (max-width:600px) { header { align-items:flex-start; flex-direction:column; } .pill {font-size:12px; padding:6px 8px;} }
+</style>
+</head>
+<body>
+<header>
+  <div><h1>LAST ONE STANDING</h1><div class="subtitle">A tiny battle royale. No building. Just survive.</div></div>
+  <button id="restartTop">Restart match</button>
+</header>
+<div id="hud">
+  <div class="pill">🛡️ Shield: <b id="shield">50</b></div>
+  <div class="pill">🔫 Ammo: <b id="ammo">∞</b></div><div class="pill">Weapon: <b id="weapon">Pistol</b></div><div class="pill">Slot: <b id="slot">1</b></div>
+  <div class="pill">🤖 Opponents: <b id="opponents">4</b></div>
+  <div class="pill">🌀 Zone: <b id="zone">Disabled</b></div>
+  <div class="pill health-pill">❤️ Health: <b id="health">100</b></div>
+</div>
+<div id="game-wrap">
+  <canvas id="game" width="1000" height="625" aria-label="Top-down battle royale game"></canvas>
+  <div id="overlay">
+    <div id="panel">
+      <h2>Ready to drop?</h2>
+      <p>Outlast 4 bot opponents and search weapon chests. No storm, no building.</p>
+      <p><b>WASD</b> move · <b>Mouse</b> aim · <b>Click / Space</b> shoot · <b>E</b> open nearby chests · <b>1–4</b> switch guns</p>
+      <button id="start">DROP IN</button>
+    </div>
+  </div>
+</div>
+<div class="controls">
+  <b>How to play:</b> Move with <span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span>, aim with your mouse, and hold click or <span class="key">Space</span> to shoot. Press <span class="key">E</span> near a chest to collect its gun. Switch weapons with <span class="key">1</span>–<span class="key">4</span>. The storm is disabled. This is a small prototype, so all opponents are bots.
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const ui = {
+    health: document.getElementById('health'),
+    shield: document.getElementById('shield'),
+    ammo: document.getElementById('ammo'),
+    opponents: document.getElementById('opponents'),
+    zone: document.getElementById('zone'),
+    overlay: document.getElementById('overlay'),
+    panel: document.getElementById('panel')
+  };
+  const keys = new Set();
+  const mouse = {x: W/2, y: H/2, down:false};
+  let player, bots, bullets, chests, obstacles, zone, running=false, ended=false;
+  let last=0, elapsed=0, shootCooldown=0, lootPulse=0, kills=0;
+  const gunPool = [
+    {name:'Rusty Pistol', rarity:'Mythical', damage:8, delay:0.48, speed:470},
+    {name:'Burst SMG', rarity:'Legendary', damage:11, delay:0.15, speed:510},
+    {name:'Scout Rifle', rarity:'Epic', damage:19, delay:0.27, speed:550},
+    {name:'Thunder Shotgun', rarity:'Rare', damage:30, delay:0.58, speed:430},
+    {name:'Pulse Rifle', rarity:'Common', damage:15, delay:0.24, speed:530},
+    {name:'Swift SMG', rarity:'Uncommon', damage:21, delay:0.09, speed:560}
+  ];
+  const rarityColors = {Common:'#d4dbe3',Uncommon:'#62e69a',Rare:'#66b8ff',Epic:'#c18aff',Legendary:'#ffb347',Mythical:'#ff657a'};
+
+  const rand = (a,b) => a + Math.random()*(b-a);
+  const clamp = (v,a,b) => Math.max(a, Math.min(b,v));
+  const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+  function circleRectHit(x,y,r,o) {
+    const cx=clamp(x,o.x,o.x+o.w), cy=clamp(y,o.y,o.y+o.h);
+    return (x-cx)**2+(y-cy)**2 < r*r;
+  }
+  function blocked(x,y,r) {
+    if (x<r+8 || x>W-r-8 || y<r+8 || y>H-r-8) return true;
+    return obstacles.some(o=>circleRectHit(x,y,r,o));
+  }
+  function moveEntity(e,dx,dy) {
+    const nx=e.x+dx, ny=e.y+dy;
+    if (!blocked(nx,e.y,e.r)) e.x=nx;
+    if (!blocked(e.x,ny,e.r)) e.y=ny;
+  }
+  function randomOpenSpot(minFromPlayer=0) {
+    for(let i=0;i<300;i++){
+      const p={x:rand(35,W-35),y:rand(35,H-35)};
+      if (!blocked(p.x,p.y,18) && (!player || dist(p,player)>minFromPlayer)) return p;
+    }
+    return {x:W/2,y:H/2};
+  }
+  function makeBot(i) {
+    const p=randomOpenSpot(180);
+    return {...p, r:13, health:100, shield:rand(0,35), speed:rand(70,92),
+      fire:rand(.3,1.5), dir:rand(0,Math.PI*2), wander:rand(.5,2), alive:true,
+      color:['#f07167','#c084fc','#f4a261','#e76f51','#e9c46a'][i%5], name:'Bot '+(i+1)};
+  }
+  function reset() {
+    elapsed=0; kills=0; ended=false; running=false; shootCooldown=0;
+    obstacles=[
+      {x:105,y:90,w:120,h:44},{x:280,y:165,w:70,h:110},
+      {x:485,y:70,w:145,h:45},{x:730,y:125,w:100,h:65},
+      {x:830,y:335,w:55,h:120},{x:610,y:410,w:135,h:55},
+      {x:355,y:450,w:100,h:70},{x:130,y:365,w:65,h:95},
+      {x:475,y:275,w:50,h:55}
+    ];
+    // Spawn in a clear area instead of inside the central cover.
+    player={x:W/2,y: H/2 + 155,r:14,health:100,shield:50,speed:245,alive:true,angle:0};
+    bots=[]; bullets=[]; chests=[];
+    player.weapons=[{name:'Pistol',rarity:'Common',damage:18,delay:0.32,speed:500},null,null,null];
+    player.selectedSlot=0;
+    // Four bots start in separate corners of the arena.
+    const cornerSpawns = [
+      {x: 48, y: 48},
+      {x: W-48, y: 48},
+      {x: 48, y: H-48},
+      {x: W-48, y: H-48}
+    ];
+    for(let i=0;i<4;i++) {
+      const p = cornerSpawns[i];
+      bots.push({...p, r:13, health:100, shield:rand(0,35), speed:rand(70,92),
+        fire:rand(.3,1.5), dir:rand(0,Math.PI*2), wander:rand(.5,2), alive:true,
+        color:['#f07167','#c084fc','#f4a261','#e76f51'][i], name:'Bot '+(i+1)});
+    }
+    // Weapon chests spawn around the arena, away from the player's starting position.
+    for(let i=0;i<14;i++){
+      const p=randomOpenSpot(110);
+      chests.push({...p,r:16,opened:false,gun:{...gunPool[Math.floor(Math.random()*gunPool.length)]}});
+    }
+    // Storm disabled: the entire arena is safe.
+    zone={x:W/2,y:H/2,r:2000,startR:2000,minR:2000,delay:999999,duration:1,damage:0};
+    ui.overlay.style.display='flex';
+    ui.panel.innerHTML='<h2>Ready to drop?</h2><p>Outlast 4 bot opponents and search weapon chests. No storm, no building.</p><p><b>WASD</b> move · <b>Mouse</b> aim · <b>Click / Space</b> shoot · <b>E</b> open nearby chests · <b>1–4</b> switch guns</p><button id="start">DROP IN</button>';
+    document.getElementById('start').addEventListener('click', start);
+    updateHud();
+    draw();
+  }
+  function start(){ if(ended) reset(); running=true; ended=false; ui.overlay.style.display='none'; last=performance.now(); requestAnimationFrame(loop); }
+  function updateHud(){
+    ui.health.textContent=Math.max(0,Math.ceil(player.health));
+    ui.shield.textContent=Math.max(0,Math.ceil(player.shield));
+    ui.ammo.textContent='∞';
+    const gun=player.weapons[player.selectedSlot];
+    const weaponEl=document.getElementById('weapon');
+    const slotEl=document.getElementById('slot');
+    if(weaponEl) weaponEl.textContent=gun?gun.name:'Empty';
+    if(slotEl) slotEl.textContent=String(player.selectedSlot+1);
+    ui.opponents.textContent=bots.filter(b=>b.alive).length;
+    ui.zone.textContent='Disabled';
+  }
+  function damage(e,amount){
+    if(e.shield>0){const s=Math.min(e.shield,amount);e.shield-=s;amount-=s;}
+    e.health-=amount;
+    if(e.health<=0){e.health=0;e.alive=false;if(e===player) finish(false); else kills++;}
+  }
+  function fire(from,angle,isPlayer,gun=null){
+    const speed=isPlayer?(gun?.speed||500):330;
+    bullets.push({x:from.x+Math.cos(angle)*(from.r+5),y:from.y+Math.sin(angle)*(from.r+5),
+      vx:Math.cos(angle)*speed,vy:Math.sin(angle)*speed,r:4,life:1.5,owner:from,playerShot:isPlayer,damage:isPlayer?(gun?.damage||18):8});
+  }
+  function nearestChest(){
+    let best=null,bd=58;
+    for(const c of chests){if(c.opened)continue;const d=dist(player,c);if(d<bd){bd=d;best=c;}}
+    return best;
+  }
+  function openChest(c){
+    if(!c || c.opened) return;
+    c.opened=true;
+    let idx=player.weapons.findIndex((w,i)=>i>0 && !w);
+    if(idx===-1) idx=player.selectedSlot;
+    player.weapons[idx]={...c.gun};
+    player.selectedSlot=idx;
+    updateHud();
+  }
+  function update(dt){
+    elapsed+=dt; lootPulse+=dt;
+    const speed=player.speed;
+    let dx=(keys.has('d')||keys.has('arrowright')?1:0)-(keys.has('a')||keys.has('arrowleft')?1:0);
+    let dy=(keys.has('s')||keys.has('arrowdown')?1:0)-(keys.has('w')||keys.has('arrowup')?1:0);
+    if(dx||dy){const len=Math.hypot(dx,dy);moveEntity(player,dx/len*speed*dt,dy/len*speed*dt);}
+    player.angle=Math.atan2(mouse.y-player.y,mouse.x-player.x);
+    if(shootCooldown>0)shootCooldown-=dt;
+    const currentGun=player.weapons[player.selectedSlot];
+    if((mouse.down||keys.has(' '))&&shootCooldown<=0&&currentGun){
+      fire(player,player.angle,true,currentGun);
+      shootCooldown=currentGun.delay;
+    }
+    // Storm removed: no shrinking zone and no zone damage.
+    for(const b of bots){
+      if(!b.alive)continue;
+      b.fire-=dt;b.wander-=dt;
+      const d=dist(b,player);
+      let target=player;
+      // Bots also fight one another if another bot is closer.
+      for(const other of bots){if(other!==b&&other.alive&&dist(b,other)<d*.82){target=other;break;}}
+      const td=dist(b,target), ang=Math.atan2(target.y-b.y,target.x-b.x);
+      if(td>145) moveEntity(b,Math.cos(ang)*b.speed*dt,Math.sin(ang)*b.speed*dt);
+      else if(td<95) moveEntity(b,-Math.cos(ang)*b.speed*.65*dt,-Math.sin(ang)*b.speed*.65*dt);
+      else if(b.wander<=0){b.dir=rand(0,Math.PI*2);b.wander=rand(.6,1.8);}
+      else moveEntity(b,Math.cos(b.dir)*b.speed*.32*dt,Math.sin(b.dir)*b.speed*.32*dt);
+      if(td<360&&b.fire<=0){
+        fire(b,ang,false);b.fire=rand(.75,1.45);
+      }
+      // No storm damage for bots either.
+    }
+    for(const bullet of bullets){
+      bullet.x+=bullet.vx*dt;bullet.y+=bullet.vy*dt;bullet.life-=dt;
+      if(bullet.x<0||bullet.x>W||bullet.y<0||bullet.y>H||obstacles.some(o=>circleRectHit(bullet.x,bullet.y,bullet.r,o))) bullet.life=0;
+      if(bullet.playerShot){
+        for(const b of bots){if(b.alive&&dist(b,bullet)<b.r+bullet.r){damage(b,bullet.damage);bullet.life=0;break;}}
+      } else if(player.alive&&dist(player,bullet)<player.r+bullet.r){damage(player,bullet.damage);bullet.life=0;}
+    }
+    bullets=bullets.filter(b=>b.life>0);
+    // Chests are opened manually with E when the player is nearby.
+    if(bots.every(b=>!b.alive))finish(true);
+    updateHud();
+  }
+  function drawGround(){
+    ctx.fillStyle='#497e4d';ctx.fillRect(0,0,W,H);
+    ctx.strokeStyle='#ffffff0b';ctx.lineWidth=1;
+    for(let x=0;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+    for(let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+  }
+  function drawEntity(e,isPlayer=false){
+    if(!e.alive)return;
+    ctx.save();ctx.translate(e.x,e.y);
+    if(isPlayer){ctx.rotate(e.angle);ctx.fillStyle='#eaf4ff';ctx.fillRect(3,-4,24,8);ctx.restore();ctx.save();ctx.translate(e.x,e.y);}
+    ctx.fillStyle=isPlayer?'#35b8ff':e.color;
+    ctx.beginPath();ctx.arc(0,0,e.r,0,Math.PI*2);ctx.fill();
+    ctx.lineWidth=3;ctx.strokeStyle=isPlayer?'#eaf7ff':'#ffe5d5';ctx.stroke();
+    ctx.fillStyle='#14202b';ctx.beginPath();ctx.arc(4,-4,3,0,Math.PI*2);ctx.fill();
+    // tiny health bar
+    ctx.fillStyle='#18212b';ctx.fillRect(-15,-e.r-10,30,4);
+    ctx.fillStyle='#6ee7a1';ctx.fillRect(-15,-e.r-10,30*Math.max(0,e.health/100),4);
+    ctx.restore();
+  }
+  function draw(){
+    drawGround();
+    // Storm and safe-zone ring removed for a clear, open arena.
+    // cover
+    for(const o of obstacles){
+      ctx.fillStyle='#5c4938';ctx.fillRect(o.x,o.y,o.w,o.h);
+      ctx.fillStyle='#806448';ctx.fillRect(o.x+4,o.y+4,o.w-8,o.h-8);
+      ctx.strokeStyle='#3c342b';ctx.lineWidth=3;ctx.strokeRect(o.x,o.y,o.w,o.h);
+    }
+    for(const c of chests){
+      if(c.opened){
+        ctx.fillStyle='#54402b';ctx.fillRect(c.x-14,c.y-8,28,16);
+        ctx.strokeStyle='#9c8058';ctx.lineWidth=2;ctx.strokeRect(c.x-14,c.y-8,28,16);
+        continue;
+      }
+      ctx.save();ctx.translate(c.x,c.y);ctx.rotate(Math.sin(lootPulse*2)*0.035);
+      ctx.fillStyle='#d49a36';ctx.fillRect(-15,-11,30,22);
+      ctx.fillStyle='#f1c75b';ctx.fillRect(-15,-11,30,7);
+      ctx.fillStyle='#6c4923';ctx.fillRect(-3,-5,6,11);
+      // Small gun symbol on the chest lid.
+      ctx.fillStyle='#26313b';ctx.fillRect(-7,-2,13,3);ctx.fillRect(3,-4,3,7);ctx.fillRect(-8,-1,3,5);
+      ctx.strokeStyle='#fff0b0';ctx.lineWidth=2;ctx.strokeRect(-15,-11,30,22);
+      ctx.restore();
+    }
+    const nearby=nearestChest();
+    if(nearby){
+      ctx.fillStyle='#10151ddd';ctx.fillRect(nearby.x-78,nearby.y-42,156,22);
+      ctx.fillStyle='#fff';ctx.font='bold 12px system-ui';ctx.textAlign='center';
+      ctx.fillText('Press E: Open chest',nearby.x,nearby.y-27);
+    }
+    for(const b of bullets){ctx.fillStyle=b.playerShot?'#fff5a5':'#ff9b70';ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,Math.PI*2);ctx.fill();}
+    for(const b of bots)drawEntity(b);
+    drawEntity(player,true);
+    // aim line
+    ctx.strokeStyle='#ffffff66';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(player.x,player.y);ctx.lineTo(mouse.x,mouse.y);ctx.stroke();
+    ctx.fillStyle='#fff';ctx.font='12px system-ui';ctx.textAlign='left';
+    ctx.fillText('KOs: '+kills,16,22);
+  }
+  function loop(now){
+    if(!running)return;
+    const dt=Math.min((now-last)/1000,.033);last=now;
+    update(dt);draw();
+    if(running)requestAnimationFrame(loop);
+  }
+  function finish(win){
+    if(ended)return;ended=true;running=false;ui.overlay.style.display='flex';
+    ui.panel.innerHTML=`<h2>${win?'🏆 VICTORY ROYALE!':'💥 ELIMINATED'}</h2><p>${win?'You outlasted every bot. Champion status: unlocked.':'The arena got the better of you this time.'}</p><p>Bot eliminations: <b>${kills}</b></p><button id="again">PLAY AGAIN</button>`;
+    document.getElementById('again').addEventListener('click',()=>{reset();start();});
+  }
+  function canvasPoint(e){
+    const rect=canvas.getBoundingClientRect();
+    return {x:(e.clientX-rect.left)*W/rect.width,y:(e.clientY-rect.top)*H/rect.height};
+  }
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  canvas.addEventListener('pointermove',e=>{const p=canvasPoint(e);mouse.x=p.x;mouse.y=p.y;});
+  canvas.addEventListener('pointerdown',e=>{if(e.button===0){mouse.down=true;canvas.setPointerCapture?.(e.pointerId);}});
+  window.addEventListener('pointerup',()=>mouse.down=false);
+  window.addEventListener('keydown',e=>{
+    const k=e.key.toLowerCase();
+    if(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright',' '].includes(k))e.preventDefault();
+    keys.add(k);
+    if(k==='e'&&player){const c=nearestChest();if(c)openChest(c);}
+    if(['1','2','3','4'].includes(k)&&player){
+      const idx=Number(k)-1;
+      if(player.weapons[idx]) player.selectedSlot=idx;
+      updateHud();
+    }
+    if(k==='enter'&&!running&&!ended)start();
+  });
+  window.addEventListener('keyup',e=>keys.delete(e.key.toLowerCase()));
+  document.getElementById('restartTop').addEventListener('click',()=>{reset();start();});
+  reset();
+})();
+</script>
+</body>
+</html>
